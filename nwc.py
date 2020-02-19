@@ -1,35 +1,98 @@
 import requests
+import gspread
+import logging
+import time
+import numpy as np
+from datetime import datetime
 from bs4 import BeautifulSoup
+from oauth2client.service_account import ServiceAccountCredentials
 
-links = {
-    'VT': 'https://secure.acsevents.org/site/TR/RelayForLife/RFLCY20SER?pg=entry&fr_id=95544',
-    'USC': 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=95442',
-    'JMU': 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=95081',
-    'UCLA': 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=95209',
-    'UGA': 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=94930',
-    'FSU': 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=95126',
-    'UMI':'https://secure.acsevents.org/site/STR?pg=entry&fr_id=95091'
+logging.basicConfig(
+    filename='app.log',
+    filemode='w',
+    format='%(asctime)s %(levelname)-8s %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S')
+
+
+class School():
+    def __init__(self, name, loc, link, starting):
+        self.name = name
+        self.loc = loc
+        self.link = link
+        self.sess = requests.Session()
+        self.starting = starting
+        self.curr_amount = self.get_current_total()
+        self.diffs = []
+
+    def get_current_total(self):
+        page = self.sess.get(self.link)
+        soup = BeautifulSoup(page.text, 'html.parser')
+        dollars = soup.find('span', class_='dollars')
+        return float(dollars.contents[1].replace(',', ''))
+
+    def update_total(self):
+        t = self.get_current_total()
+
+        self.diffs.append(t - self.curr_amount)
+
+        if len(self.diffs) > 60:
+            self.diffs.pop(0)
+
+        self.curr_amount = t
+        return self.curr_amount
+
+    def nwc_amount(self):
+        return self.curr_amount - self.starting
+
+    def past_hour(self):
+        return sum(self.diffs)
+
+
+schools = {
+    'VT': School('VT', 2, 'https://secure.acsevents.org/site/TR/RelayForLife/RFLCY20SER?pg=entry&fr_id=95544', 200746),
+    'USC': School('USC', 3, 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=95442', 53928),
+    'JMU': School('JMU', 4, 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=95081', 103492),
+    'UCLA': School('UCLA', 5, 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=95209',36808),
+    'UGA': School('UGA', 6, 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=94930', 121353),
+    'FSU': School('FSU', 7, 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=95126', 80465),
+    'UMI':School('UMI', 8, 'https://secure.acsevents.org/site/STR?pg=entry&fr_id=95091', 122442),
 }
 
-starting_amounts = {
-    'VT': 200746,
-    'USC': 53927.97,
-    'JMU': 103492,
-    'UCLA': 36808,
-    'UGA': 121353,
-    'FSU': 80465,
-    'UMI':122442
-}
+logging.info('Initialzing connections to Google Sheet...')
 
-def get_current_total(link):
-    page = requests.get(link)
-    soup = BeautifulSoup(page.text, 'html.parser')
-    dollars = soup.find('span', class_='dollars')
-    return float(dollars.contents[1].replace(',', ''))
+scope = [
+    'https://spreadsheets.google.com/feeds',
+    'https://www.googleapis.com/auth/drive'
+]
 
-print(' School |   Total   |  So Far')
+creds = ServiceAccountCredentials.from_json_keyfile_name('credentials_sheets.json', scope)
 
-for school, link in links.items():
-    curr_total = get_current_total(link)
-    diff = curr_total - starting_amounts[school]
-    print(f'{school:^8}|{curr_total:^11.2f}|{diff:^10.2f}')
+client = gspread.authorize(creds)
+
+sheet = client.open('NWC Updater').sheet1
+
+logging.info('Connection to Google Sheet Initialized!')
+sheet.update_acell('B10', str(datetime.now()))
+
+while True:
+
+    logging.info('Beginning Update...')
+
+    school_data = sheet.range('A2:D8')
+    school_data = np.reshape(school_data, (len(schools), -1))
+
+    for row in school_data:
+        school = schools[row[0].value]
+        school.update_total()
+
+        row[1].value = f'{school.nwc_amount():.2f}'
+        row[2].value = f'{school.curr_amount:.2f}'
+        row[3].value = f'{school.past_hour():.2f}'
+
+
+    sheet.update_cells(list(np.ravel(school_data)))
+    sheet.update_acell('B11', str(datetime.now()))
+
+    logging.info('Update Completed!')
+    time.sleep(60)
